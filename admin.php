@@ -98,16 +98,19 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
       $userMap[(string)$row["username"]] = (int)$row["user_id"];
     }
 
-    // repeat_group_id があるか（将来拡張用）
+    // repeat_group_id があるか（将来拡張用） ※PostgreSQL対応
     $hasRepeatGroup = false;
     try {
-      $cols = $pdo->query("SHOW COLUMNS FROM reservation")->fetchAll(PDO::FETCH_ASSOC);
-      foreach ($cols as $col) {
-        if ((string)($col["Field"] ?? "") === "repeat_group_id") {
-          $hasRepeatGroup = true;
-          break;
-        }
-      }
+      $st = $pdo->prepare("
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'reservation'
+          AND column_name = 'repeat_group_id'
+        LIMIT 1
+      ");
+      $st->execute();
+      $hasRepeatGroup = (bool)$st->fetchColumn();
     } catch (Throwable $e) {
       $hasRepeatGroup = false;
     }
@@ -192,7 +195,13 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         }
 
         // 既存予約との重複チェック
-        $chk = $pdo->prepare("\n          SELECT COUNT(*) AS c\n          FROM reservation\n          WHERE classroom_id = ?\n            AND reservation_date = ?\n            AND NOT (end_time <= ? OR start_time >= ?)\n        ");
+        $chk = $pdo->prepare("
+          SELECT COUNT(*) AS c
+          FROM reservation
+          WHERE classroom_id = ?
+            AND reservation_date = ?
+            AND NOT (end_time <= ? OR start_time >= ?)
+        ");
         $chk->execute([$classroomId, $date, $start . ":00", $end . ":00"]);
         $c = (int)($chk->fetch(PDO::FETCH_ASSOC)["c"] ?? 0);
         if ($c > 0) {
@@ -202,10 +211,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         }
 
         if ($hasRepeatGroup) {
-          $ins = $pdo->prepare("\n            INSERT INTO reservation (classroom_id, user_id, reservation_date, start_time, end_time, user_name, title, repeat_group_id)\n            VALUES (?, ?, ?, ?, ?, ?, ?, NULL)\n          ");
+          $ins = $pdo->prepare("
+            INSERT INTO reservation (classroom_id, user_id, reservation_date, start_time, end_time, user_name, title, repeat_group_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+          ");
           $ins->execute([$classroomId, $uid, $date, $start . ":00", $end . ":00", $userName, $title]);
         } else {
-          $ins = $pdo->prepare("\n            INSERT INTO reservation (classroom_id, user_id, reservation_date, start_time, end_time, user_name, title)\n            VALUES (?, ?, ?, ?, ?, ?, ?)\n          ");
+          $ins = $pdo->prepare("
+            INSERT INTO reservation (classroom_id, user_id, reservation_date, start_time, end_time, user_name, title)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          ");
           $ins->execute([$classroomId, $uid, $date, $start . ":00", $end . ":00", $userName, $title]);
         }
 
@@ -237,14 +252,23 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     exit;
   }
 
-  // 教室：更新
+  // 教室：更新（PostgreSQL対応：LIMIT削除 + RETURNING）
   if ($action === "classroom_update") {
     $id = $_POST["classroom_id"] ?? "";
     $name = trim($_POST["classroom_name"] ?? "");
     $floor = trim($_POST["floor"] ?? "");
     if (preg_match("/^\d+$/", (string)$id) && $name !== "" && $floor !== "") {
-      $stmt = $pdo->prepare("UPDATE classroom SET classroom_name = ?, floor = ? WHERE classroom_id = ? LIMIT 1");
+      $stmt = $pdo->prepare("
+        UPDATE classroom
+        SET classroom_name = ?, floor = ?
+        WHERE classroom_id = ?
+        RETURNING classroom_id
+      ");
       $stmt->execute([$name, $floor, (int)$id]);
+      $updated = $stmt->fetchColumn();
+      if (!$updated) {
+        // 対象が無い場合でもUIは変えない（通知も出さない）
+      }
       header("Location: admin.php?tab=classrooms"); // 通知は出さない
       exit;
     }
@@ -252,7 +276,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     exit;
   }
 
-  // 教室：削除
+  // 教室：削除（PostgreSQL対応：LIMIT削除 + RETURNING）
   if ($action === "classroom_delete") {
     $id = $_POST["classroom_id"] ?? "";
     if (preg_match("/^\d+$/", (string)$id)) {
@@ -265,8 +289,17 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         exit;
       }
 
-      $stmt = $pdo->prepare("DELETE FROM classroom WHERE classroom_id = ? LIMIT 1");
+      $stmt = $pdo->prepare("
+        DELETE FROM classroom
+        WHERE classroom_id = ?
+        RETURNING classroom_id
+      ");
       $stmt->execute([(int)$id]);
+      $deleted = $stmt->fetchColumn();
+      if (!$deleted) {
+        // 対象が無い場合でもUIは変えない（通知も出さない）
+      }
+
       header("Location: admin.php?tab=classrooms"); // 通知は出さない
       exit;
     }
@@ -274,12 +307,21 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     exit;
   }
 
-  // ユーザ：管理者切り替え
+  // ユーザ：管理者切り替え（PostgreSQL対応：LIMIT削除 + RETURNING）
   if ($action === "user_toggle_admin") {
     $id = $_POST["user_id"] ?? "";
     if (preg_match("/^\d+$/", (string)$id)) {
-      $stmt = $pdo->prepare("UPDATE users SET is_admin = 1 - is_admin WHERE user_id = ? LIMIT 1");
+      $stmt = $pdo->prepare("
+        UPDATE users
+        SET is_admin = 1 - is_admin
+        WHERE user_id = ?
+        RETURNING user_id
+      ");
       $stmt->execute([(int)$id]);
+      $updated = $stmt->fetchColumn();
+      if (!$updated) {
+        // 対象が無い場合でもUIは変えない
+      }
       header("Location: admin.php?tab=users"); // 通知は出さない
       exit;
     }
@@ -287,7 +329,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     exit;
   }
 
-  // ユーザ：停止/解除（is_user 1=有効 / 0=停止）
+  // ユーザ：停止/解除（is_user 1=有効 / 0=停止）（PostgreSQL対応）
   if ($action === "user_toggle_active") {
     $id = $_POST["user_id"] ?? "";
     if (preg_match("/^\d+$/", (string)$id)) {
@@ -301,8 +343,17 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
       }
 
       // 0/1 を反転
-      $stmt = $pdo->prepare("UPDATE users SET is_user = 1 - is_user WHERE user_id = ? LIMIT 1");
+      $stmt = $pdo->prepare("
+        UPDATE users
+        SET is_user = 1 - is_user
+        WHERE user_id = ?
+        RETURNING user_id
+      ");
       $stmt->execute([$targetId]);
+      $updated = $stmt->fetchColumn();
+      if (!$updated) {
+        // 対象が無い場合でもUIは変えない
+      }
 
       header("Location: admin.php?tab=users"); // 通知は出さない
       exit;
@@ -311,14 +362,23 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     exit;
   }
 
-  // ユーザ：パスワードリセット（指定パスワードに変更）
+  // ユーザ：パスワードリセット（指定パスワードに変更）（PostgreSQL対応）
   if ($action === "user_reset_password") {
     $id = $_POST["user_id"] ?? "";
     $newpw = (string)($_POST["new_password"] ?? "");
     if (preg_match("/^\d+$/", (string)$id) && $newpw !== "") {
       $hash = password_hash($newpw, PASSWORD_DEFAULT);
-      $stmt = $pdo->prepare("UPDATE users SET password_hash = ? WHERE user_id = ? LIMIT 1");
+      $stmt = $pdo->prepare("
+        UPDATE users
+        SET password_hash = ?
+        WHERE user_id = ?
+        RETURNING user_id
+      ");
       $stmt->execute([$hash, (int)$id]);
+      $updated = $stmt->fetchColumn();
+      if (!$updated) {
+        // 対象が無い場合でもUIは変えない
+      }
       header("Location: admin.php?tab=users"); // 通知は出さない
       exit;
     }
@@ -326,19 +386,26 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     exit;
   }
 
-  // 予約：削除（管理者は全削除OK）
+  // 予約：削除（管理者は全削除OK）（PostgreSQL対応）
   if ($action === "reservation_delete") {
     $rid = $_POST["reservation_id"] ?? "";
     if (preg_match("/^\d+$/", (string)$rid)) {
-      $stmt = $pdo->prepare("DELETE FROM reservation WHERE reservation_id = ? LIMIT 1");
+      $stmt = $pdo->prepare("
+        DELETE FROM reservation
+        WHERE reservation_id = ?
+        RETURNING reservation_id
+      ");
       $stmt->execute([(int)$rid]);
+      $deleted = $stmt->fetchColumn();
+      if (!$deleted) {
+        // 対象が無い場合でもUIは変えない
+      }
       header("Location: admin.php?tab=reservations"); // 通知は出さない
       exit;
     }
     header("Location: admin.php?tab=reservations");
     exit;
   }
-
 
   // 予約：複数削除（管理者は全削除OK）
   if ($action === "reservation_delete_bulk") {
@@ -844,7 +911,6 @@ $__back = safe_back_url($_SERVER["REQUEST_URI"] ?? "admin.php", "admin.php");
           <span>ユーザー切り替え</span>
           <span class="sub">別アカでログイン</span>
         </a>
-
 
         <a class="drawer__link" href="logout.php?next=<?= h(urlencode("login.php?back=" . urlencode($__back))) ?>">
           <span>ログアウト</span>

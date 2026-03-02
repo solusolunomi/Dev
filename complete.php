@@ -90,8 +90,8 @@ if (empty($errors)) {
       "date"      => $date,
       "from"      => $from,
       "to"        => $to,
-      "start_time_sql" => minutesToTimeSql($from, 9),
-      "end_time_sql"   => minutesToTimeSql($to, 9),
+      "start_time_sql" => minutesToTimeSql($from, 8),
+      "end_time_sql"   => minutesToTimeSql($to, 8),
     ];
   }
 
@@ -145,21 +145,25 @@ $overlaps = [];
 
 if (empty($errors)) {
   try {
-    $pdo->beginTransaction();
-
-    // repeat_group_id があるか（無ければ通常INSERT）
+    // repeat_group_id があるか（PostgreSQL / Supabase 対応）
     $hasRepeatGroup = false;
     try {
-      $cols = $pdo->query("SHOW COLUMNS FROM reservation")->fetchAll(PDO::FETCH_ASSOC);
-      foreach ($cols as $col) {
-        if ((string)($col['Field'] ?? '') === 'repeat_group_id') {
-          $hasRepeatGroup = true;
-          break;
-        }
-      }
+      $stmt = $pdo->prepare("
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'reservation'
+          AND column_name = 'repeat_group_id'
+        LIMIT 1
+      ");
+      $stmt->execute();
+      $hasRepeatGroup = (bool)$stmt->fetchColumn();
     } catch (Throwable $e) {
       $hasRepeatGroup = false;
     }
+
+    // ★ここでトランザクション開始（ここより前でSQLエラーを起こさない）
+    $pdo->beginTransaction();
 
     // 同じ定期予約を束ねるID（列が無い環境ではNULL）
     $repeatGroupId = null;
@@ -223,7 +227,7 @@ if (empty($errors)) {
         continue;
       }
 
-      $insertStmt->execute([
+      $params = [
         $title,
         $userName,
         current_user_id(),
@@ -231,8 +235,12 @@ if (empty($errors)) {
         $reservationDate,
         $startTime,
         $endTime,
-        ...($hasRepeatGroup ? [$repeatGroupId] : [])
-      ]);
+      ];
+      if ($hasRepeatGroup) {
+        $params[] = $repeatGroupId;
+      }
+
+      $insertStmt->execute($params);
 
       $insertedCount++;
 

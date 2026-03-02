@@ -12,7 +12,8 @@ function h($s)
 $myColor = "";
 $hasUserColorColumn = true;
 try {
-  $stmt = $pdo->prepare("SELECT color FROM users WHERE user_id = ? LIMIT 1");
+  // ★PostgreSQL対応：LIMIT削除
+  $stmt = $pdo->prepare("SELECT color FROM users WHERE user_id = ?");
   $stmt->execute([current_user_id()]);
   $row = $stmt->fetch(PDO::FETCH_ASSOC);
   $myColor = (string)($row["color"] ?? "");
@@ -39,8 +40,15 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
     $uid = current_user_id();
     if ($uid !== null) {
-      $stmt = $pdo->prepare("UPDATE users SET color = ? WHERE user_id = ? LIMIT 1");
+      // ★PostgreSQL対応：LIMIT削除 + RETURNING
+      $stmt = $pdo->prepare("
+        UPDATE users
+        SET color = ?
+        WHERE user_id = ?
+        RETURNING user_id
+      ");
       $stmt->execute([$color, (int)$uid]);
+      $stmt->fetchColumn();
     }
 
     header("Location: my_reservations.php");
@@ -147,35 +155,12 @@ $back = "my_reservations.php?from=" . urlencode($from) . "&to=" . urlencode($to)
       <?php if (empty($list)): ?>
         <p class="card-text">この期間の予約はありません。</p>
       <?php else: ?>
-        <div class="bulk-actions">
-          <label class="bulk-check">
-            <input type="checkbox" id="bulkSelectAll">
-            <span>まとめて選択</span>
-          </label>
-
-          <form action="cancel.php" method="post" id="bulkCancelForm" style="margin:0;">
-            <input type="hidden" name="back" value="<?= h($back) ?>">
-            <div id="bulkHidden"></div>
-            <button type="submit" class="danger-btn" id="bulkCancelBtn" disabled
-              onclick="return confirm('選択した予約を削除します。よろしいですか？');">
-              選択を削除
-            </button>
-          </form>
-
-          <?php if (!empty($_GET["deleted"])): ?>
-            <span class="bulk-note">削除：<?= h((string)$_GET["deleted"]) ?>件</span>
-          <?php endif; ?>
-        </div>
-
         <div class="reserve-list-view" style="margin-top:12px;">
           <?php foreach ($list as $r): ?>
             <?php
             $editUrl = "edit.php?reservation_id=" . urlencode($r["reservation_id"]) . "&back=" . urlencode($back);
             ?>
             <div class="reserve-row" style="align-items:center;">
-              <label class="row-check" title="この予約を選択">
-                <input type="checkbox" class="bulk-item" value="<?= h($r["reservation_id"]) ?>">
-              </label>
               <span class="badge"><?= h($r["reservation_date"]) ?></span>
               <span class="badge"><?= h($r["classroom_name"] ?? ("教室ID:" . $r["classroom_id"])) ?></span>
               <span class="badge"><?= h(($r["floor"] ?? "") !== "" ? ($r["floor"] . "階") : "-") ?></span>
@@ -191,7 +176,7 @@ $back = "my_reservations.php?from=" . urlencode($from) . "&to=" . urlencode($to)
               <div style="margin-left:auto; display:flex; gap:10px; flex-wrap:wrap;">
                 <a class="reserve-btn" href="<?= h($editUrl) ?>" style="text-decoration:none;">編集</a>
 
-                <form action="cancel.php" method="post" onsubmit="return confirm('この予約をキャンセルします。よろしいですか？');" style="margin:0;">
+                <form action="cancel.php" method="post" onsubmit="return confirm('この予約をキャンセルしますか？');" style="margin:0;">
                   <input type="hidden" name="reservation_id" value="<?= h($r["reservation_id"]) ?>">
                   <input type="hidden" name="back" value="<?= h($back) ?>">
                   <button type="submit" class="danger-btn">削除</button>
@@ -200,64 +185,13 @@ $back = "my_reservations.php?from=" . urlencode($from) . "&to=" . urlencode($to)
             </div>
           <?php endforeach; ?>
         </div>
-
-
-        <script>
-          (function() {
-            const all = document.getElementById('bulkSelectAll');
-            const items = Array.from(document.querySelectorAll('.bulk-item'));
-            const btn = document.getElementById('bulkCancelBtn');
-            const hidden = document.getElementById('bulkHidden');
-            const form = document.getElementById('bulkCancelForm');
-
-            function sync() {
-              const checkedItems = items.filter(i => i.checked);
-              btn.disabled = checkedItems.length === 0;
-              if (items.length === 0) {
-                if (all) {
-                  all.checked = false;
-                  all.indeterminate = false;
-                }
-                return;
-              }
-              if (all) {
-                all.checked = checkedItems.length === items.length;
-                all.indeterminate = checkedItems.length > 0 && checkedItems.length < items.length;
-              }
-            }
-
-            if (all) {
-              all.addEventListener('change', () => {
-                items.forEach(i => i.checked = all.checked);
-                sync();
-              });
-            }
-            items.forEach(i => i.addEventListener('change', sync));
-
-            if (form) {
-              form.addEventListener('submit', () => {
-                // 送信直前に hidden inputs を作る（ネストform回避のため）
-                hidden.innerHTML = '';
-                items.filter(i => i.checked).forEach(i => {
-                  const inp = document.createElement('input');
-                  inp.type = 'hidden';
-                  inp.name = 'reservation_ids[]';
-                  inp.value = i.value;
-                  hidden.appendChild(inp);
-                });
-              });
-            }
-
-            sync();
-          })();
-        </script>
       <?php endif; ?>
     </section>
   </main>
 
   <footer class="app-footer">2026補習© 教室管理ナビゲーション-教ナビ</footer>
+
   <?php
-  // ドロワーで使う戻り先（ログイン/切替用）
   $__back = safe_back_url($_SERVER["REQUEST_URI"] ?? "index.php", "index.php");
   ?>
   <?php include __DIR__ . "/drawer.php"; ?>
